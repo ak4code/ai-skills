@@ -504,7 +504,7 @@ from rest_framework.response import Response
 
 from apps.orders import selectors, services
 from apps.orders.serializers import (
-    OrderCreateInputSerializer,
+    OrderCreateRequestSerializer,
     OrderDetailSerializer,
     OrderListSerializer,
 )
@@ -518,26 +518,26 @@ class OrderViewSet(viewsets.GenericViewSet):
             customer_id=request.user.id,
         )
         page = self.paginate_queryset(orders_queryset)
-        output_serializer = OrderListSerializer(page, many=True)
-        return self.get_paginated_response(output_serializer.data)
+        response_serializer = OrderListSerializer(page, many=True)
+        return self.get_paginated_response(response_serializer.data)
 
     def retrieve(self, request, pk: int):
         target_order = selectors.get_order_for_customer(
             customer_id=request.user.id,
             order_id=int(pk),
         )
-        output_serializer = OrderDetailSerializer(target_order)
-        return Response(output_serializer.data)
+        response_serializer = OrderDetailSerializer(target_order)
+        return Response(response_serializer.data)
 
     def create(self, request):
-        input_serializer = OrderCreateInputSerializer(data=request.data)
-        input_serializer.is_valid(raise_exception=True)
+        request_serializer = OrderCreateRequestSerializer(data=request.data)
+        request_serializer.is_valid(raise_exception=True)
 
         try:
             new_order = services.create_order(
                 customer_id=request.user.id,
-                items=input_serializer.validated_data["items"],
-                promo_code=input_serializer.validated_data.get("promo_code"),
+                items=request_serializer.validated_data["items"],
+                promo_code=request_serializer.validated_data.get("promo_code"),
             )
         except OrderValidationError as validation_exception:
             return Response(
@@ -545,18 +545,18 @@ class OrderViewSet(viewsets.GenericViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        output_serializer = OrderDetailSerializer(new_order)
-        return Response(output_serializer.data, status=status.HTTP_201_CREATED)
+        response_serializer = OrderDetailSerializer(new_order)
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk: int):
-        input_serializer = OrderCancelInputSerializer(data=request.data)
-        input_serializer.is_valid(raise_exception=True)
+        request_serializer = OrderCancelRequestSerializer(data=request.data)
+        request_serializer.is_valid(raise_exception=True)
 
         try:
             cancelled_order = services.cancel_order(
                 order_id=int(pk),
-                reason=input_serializer.validated_data["reason"],
+                reason=request_serializer.validated_data["reason"],
             )
         except OrderValidationError as validation_exception:
             return Response(
@@ -564,8 +564,8 @@ class OrderViewSet(viewsets.GenericViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        output_serializer = OrderDetailSerializer(cancelled_order)
-        return Response(output_serializer.data)
+        response_serializer = OrderDetailSerializer(cancelled_order)
+        return Response(response_serializer.data)
 ```
 
 Видно, что в view нет ничего, кроме разбора запроса и вызова. Любую логику видно по имени функции в `services` или `selectors`.
@@ -634,12 +634,12 @@ class OrderCreateSerializer(serializers.ModelSerializer):
 - Валидация в `validate()` делает запрос в БД на каждый item. На большом запросе это N запросов.
 - Никакой атомарности: если письмо упадёт, заказ уже создан.
 
-#### Правильно: input/output сериализаторы
+#### Правильно: request/response сериализаторы
 
-Разделяем сериализатор на два: один для входа (валидация формата), второй для выхода (отрисовка).
+Разделяем сериализатор на два: request для приёма и валидации формата запроса, response для отрисовки данных в ответ.
 
 ```python
-class OrderCreateInputSerializer(serializers.Serializer):
+class OrderCreateRequestSerializer(serializers.Serializer):
     items = serializers.ListField(
         child=serializers.DictField(),
         min_length=1,
@@ -648,7 +648,7 @@ class OrderCreateInputSerializer(serializers.Serializer):
     promo_code = serializers.CharField(max_length=50, required=False, allow_blank=True)
 
 
-class OrderItemOutputSerializer(serializers.Serializer):
+class OrderItemResponseSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     product_id = serializers.IntegerField()
     quantity = serializers.IntegerField()
@@ -660,21 +660,21 @@ class OrderDetailSerializer(serializers.Serializer):
     status = serializers.CharField()
     total_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
     created_at = serializers.DateTimeField()
-    items = OrderItemOutputSerializer(many=True)
+    items = OrderItemResponseSerializer(many=True)
 ```
 
 Не `ModelSerializer`, а обычный `Serializer`. Поля описываются явно. Это:
 - независимость от модели: меняем БД без поломки контракта API,
 - явный список полей: никаких "случайно вылез internal_notes наружу",
 - никакой логики в сериализаторе: его функция только перевод формата,
-- никакой связи с request, можно использовать вне HTTP.
+- никакой связи с HTTP контекстом, можно использовать вне view.
 
 Бизнес-валидация (хватает ли товара, корректен ли промокод) живёт в сервисе, не в сериализаторе. Сериализатор проверяет только что `quantity` это положительное целое.
 
 ### Inline валидация одного поля это нормально
 
 ```python
-class OrderCreateInputSerializer(serializers.Serializer):
+class OrderCreateRequestSerializer(serializers.Serializer):
     items = serializers.ListField(child=serializers.DictField(), min_length=1)
     promo_code = serializers.CharField(max_length=50, required=False, allow_blank=True)
 
@@ -841,17 +841,17 @@ def domain_exception_handler(exception_value, context):
 
 ```python
 def create(self, request):
-    input_serializer = OrderCreateInputSerializer(data=request.data)
-    input_serializer.is_valid(raise_exception=True)
+    request_serializer = OrderCreateRequestSerializer(data=request.data)
+    request_serializer.is_valid(raise_exception=True)
 
     new_order = services.create_order(
         customer_id=request.user.id,
-        items=input_serializer.validated_data["items"],
-        promo_code=input_serializer.validated_data.get("promo_code"),
+        items=request_serializer.validated_data["items"],
+        promo_code=request_serializer.validated_data.get("promo_code"),
     )
 
-    output_serializer = OrderDetailSerializer(new_order)
-    return Response(output_serializer.data, status=status.HTTP_201_CREATED)
+    response_serializer = OrderDetailSerializer(new_order)
+    return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 ```
 
 ## Тестирование
@@ -987,7 +987,7 @@ def test_create_order_endpoint_returns_201(authenticated_client, mocker) -> None
 | Создание из admin action | вызов сервиса из admin action |
 | Создание из Celery таски | вызов сервиса из таски |
 | Перевод доменного исключения в HTTP | глобальный DRF exception handler |
-| Сериализация для API ответа | `serializers.py` (Output serializer) |
-| Валидация формата запроса | `serializers.py` (Input serializer) |
+| Сериализация для API ответа | `serializers.py` (Response serializer) |
+| Валидация формата запроса | `serializers.py` (Request serializer) |
 | Бизнес-валидация (другие модели, БД) | в сервисе |
 | Идемпотентность таски | в сервисе через таблицу processed events |
